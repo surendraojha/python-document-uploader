@@ -1,9 +1,7 @@
 import uuid
 from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.dialects.mysql import DATETIME
-from datetime import datetime  # Add this for using datetime.utcnow if needed
-
-from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
 from . import db
 from werkzeug.security import generate_password_hash, check_password_hash
 # User model
@@ -17,7 +15,11 @@ class Customer(db.Model):
     email = db.Column(db.String(50),nullable=False,unique=True)
     password = db.Column(db.String(200),nullable=False)
     phone = db.Column(db.String(20),nullable=False)
-    address = db.Column(db.String(100),nullable=True)
+    street_address = db.Column(db.String(100),nullable=False)
+    city = db.Column(db.String(25),nullable=False)
+    state = db.Column(db.String(2),nullable=False)
+    zip_code = db.Column(db.String(5),nullable=False)
+
     deleted = db.Column(db.Boolean,nullable=False,default=False)
     account_verified = db.Column(db.Boolean,nullable=False,default=True)
     created_at = db.Column(DATETIME, nullable=False, default=datetime.utcnow)
@@ -28,6 +30,32 @@ class Customer(db.Model):
 
     def check_password(self, pwd):
         return check_password_hash(self.password, pwd)
+    
+    
+    def to_dict(self,include_all=False):
+        
+        customer_data = {
+            'guid': self.guid,
+            'firstName': self.firstname,
+            'lastName': self.lastname,
+            'email': self.email,
+            'phone': self.phone
+        }
+        
+        if include_all:
+            customer_data.update({
+                'streetAddress': self.street_address,
+                'city': self.city,
+                'state': self.state,
+                'zipCode': self.zip_code,
+
+            })
+        customer_data.update({
+            'createdAt': self.created_at.isoformat() if self.created_at else None,
+            'updatedAt': self.updated_at.isoformat() if self.updated_at else None,
+        })
+        
+        return customer_data
 
 def __repr__(self):
         return f"<Customer {self.email}>"

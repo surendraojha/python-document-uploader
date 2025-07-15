@@ -1,7 +1,7 @@
 import re
 from flask import Blueprint, request, jsonify
 
-auth_bp = Blueprint('auth', __name__, url_prefix='/auth')
+auth_bp = Blueprint('auth', __name__, url_prefix='/cpa')
 
 from models import User, Business,db
 from flask_jwt_extended import create_access_token

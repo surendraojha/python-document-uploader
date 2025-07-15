@@ -5,3 +5,4 @@ db = SQLAlchemy()
 from .User import User
 from .Business import Business
 from .Customer import Customer
+from .CustomerDocument import CustomerDocument
