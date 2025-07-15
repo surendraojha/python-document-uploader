@@ -24,10 +24,11 @@ class CustomerDocument(db.Model):
     
     def to_dict(self):
         
+        
+        
         document_data = {
             'guid': self.guid,
             'documentName': self.document_name,
-            'document_path': self.document_path,
             'fileType': self.file_type,
             'file_size': self.file_size,
             'createdAt': self.created_at.isoformat() if self.created_at else None,

@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
 # Assuming these are defined in your models.py
-from models import Customer, User, db, CustomerDocument
+from models import Customer, db, CustomerDocument
 
 # Assuming helpers contains get_s3_client or similar if you moved it
 customer_document_bp = Blueprint('customer_document', __name__, url_prefix='/customer')
@@ -49,6 +49,11 @@ def upload_customer_document():
     """
     # Get the current authenticated customer's GUID from the JWT
     current_customer_guid = get_jwt_identity()
+    document_name = request.form.get('document_name')
+
+    if not document_name:
+        return jsonify({"statuscode": 422, "message": "Document Name field is required"}), 422
+
 
     # 1. Fetch Customer details from the database using the GUID
     # This step is crucial to get the BIGINT customer_id and business_id for the CustomerDocument schema.
@@ -92,7 +97,6 @@ def upload_customer_document():
         file.seek(0) # Reset stream position to the beginning
 
         # Generate a unique filename for S3 to prevent collisions and ensure uniqueness.
-        # Includes a UUID and a timestamp for better uniqueness and traceability.
         unique_filename = f"{uuid.uuid4()}.{file_extension}"
 
         # Define the S3 object key (path within the S3 bucket).
@@ -124,7 +128,7 @@ def upload_customer_document():
             new_document = CustomerDocument(
                 business_id=business_id_for_db,
                 customer_id=customer_id_for_db,
-                document_name=original_filename,
+                document_name=document_name,
                 document_path=s3_object_path_for_db, # Store the internal S3 path
                 file_type=file_extension,
                 file_size=str(file_size), # Convert file size to string as per your VARCHAR(25) schema
@@ -261,4 +265,91 @@ def download_customer_document():
         return jsonify({"statuscode": 500, "message": "AWS credentials not configured correctly."}), 500
     except Exception as e:
         current_app.logger.error(f"An unexpected error occurred during presigned URL generation: {e}")
+        return jsonify({"statuscode": 500, "message": f"An unexpected error occurred: {str(e)}"}), 500
+
+
+
+@customer_document_bp.route('/document-list', methods=['GET'])
+@jwt_required()
+def document_list():
+    """
+    Retrieves a paginated list of documents for the authenticated customer.
+
+    Query Parameters:
+    - page (int, optional): The page number to retrieve. Defaults to 1.
+    - per_page (int, optional): The number of items per page. Defaults to 10.
+    """
+    current_customer_guid = get_jwt_identity()
+
+    # 1. Fetch authenticated customer details for authorization
+    try:
+        customer_obj = Customer.query.filter_by(guid=current_customer_guid).first()
+        if not customer_obj:
+            return jsonify({"statuscode": 404, "message": "Authenticated customer not found."}), 404
+
+        customer_id_for_db = customer_obj.id
+        business_id_for_db = customer_obj.business_id
+
+    except Exception as e:
+        current_app.logger.error(f"Error fetching customer details for document list: {e}")
+        return jsonify({"statuscode": 500, "message": "Failed to retrieve customer information."}), 500
+
+    # 2. Get pagination parameters from query string
+    try:
+        page = int(request.args.get('page', 1))  # Default to page 1
+        per_page = int(request.args.get('per_page', 10)) # Default to 10 items per page
+
+        # Validate parameters to ensure they are positive
+        if page < 1 or per_page < 1:
+            return jsonify({"statuscode": 400, "message": "Page and per_page parameters must be positive integers."}), 400
+        
+        # Optional: Limit the maximum per_page to prevent excessively large queries
+        if per_page > 100: # Example: allow a maximum of 100 items per page
+            per_page = 100
+
+    except ValueError:
+        return jsonify({"statuscode": 400, "message": "Invalid 'page' or 'per_page' format. Must be integers."}), 400
+
+    # 3. Query documents with pagination
+    try:
+        # Base query to filter documents by the authenticated customer and business
+        # Order by created_at to ensure consistent pagination results (e.g., newest first)
+        base_query = db.session.query(CustomerDocument).filter_by(
+            customer_id=customer_id_for_db,
+            business_id=business_id_for_db
+        ).order_by(CustomerDocument.created_at.desc())
+
+        # Use Flask-SQLAlchemy's .paginate() method
+        # error_out=False prevents raising a 404 error if the page number is out of range,
+        # instead it returns an empty items list and appropriate metadata.
+        paginated_documents = base_query.paginate(page=page, per_page=per_page, error_out=False)
+
+        # 4. Prepare the list of documents for the JSON response
+        documents_data = []
+        for doc in paginated_documents.items:          
+            documents_data.append(doc.to_dict())
+
+        # 5. Return the paginated response with metadata
+        return jsonify({
+            "statuscode": 200,
+            "message": "Documents retrieved successfully.",
+            "data": documents_data,
+            "pagination": {
+                "total_items": paginated_documents.total,        # Total number of items across all pages
+                "total_pages": paginated_documents.pages,        # Total number of pages
+                "current_page": paginated_documents.page,      # Current page number
+                "items_on_page": len(paginated_documents.items), # Number of items returned on the current page
+                "items_per_page": paginated_documents.per_page,  # Configured items per page
+                "has_next": paginated_documents.has_next,        # True if there's a next page
+                "has_prev": paginated_documents.has_prev,        # True if there's a previous page
+                "next_page": paginated_documents.next_num,       # Next page number (or None)
+                "prev_page": paginated_documents.prev_num        # Previous page number (or None)
+            }
+        }), 200
+
+    except SQLAlchemyError as e:
+        current_app.logger.error(f"Database error retrieving document list: {e}")
+        return jsonify({"statuscode": 500, "message": "Error retrieving document list from database."}), 500
+    except Exception as e:
+        current_app.logger.error(f"An unexpected error occurred during document list retrieval: {e}")
         return jsonify({"statuscode": 500, "message": f"An unexpected error occurred: {str(e)}"}), 500
