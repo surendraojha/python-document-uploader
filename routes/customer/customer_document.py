@@ -7,9 +7,11 @@ from botocore.exceptions import NoCredentialsError, ClientError
 from sqlalchemy.exc import SQLAlchemyError
 
 from flask_jwt_extended import jwt_required, get_jwt_identity
+import tempfile
 
 # Assuming these are defined in your models.py
 from models import Customer, db, CustomerDocument
+from flask import send_file
 
 # Assuming helpers contains get_s3_client or similar if you moved it
 customer_document_bp = Blueprint('customer_document', __name__, url_prefix='/customer')
@@ -173,9 +175,9 @@ def upload_customer_document():
 
 
 # --- New Download Route ---
-@customer_document_bp.route('/document-download', methods=['GET'])
+@customer_document_bp.route('/document-download/<string:document_guid>', methods=['GET'])
 @jwt_required()
-def download_customer_document():
+def download_customer_document(document_guid):
     """
     Generates a pre-signed URL for downloading a specific customer document from S3.
     Requires a 'document_id' as a query parameter.
@@ -183,23 +185,15 @@ def download_customer_document():
     current_customer_guid = get_jwt_identity()
 
     # 1. Get the document_id from query parameters
-    document_id_str = request.args.get('document_id')
-    if not document_id_str:
+    if not document_guid:
         return jsonify({"statuscode": 400, "message": "Missing 'document_id' query parameter."}), 400
 
-    try:
-        document_id = int(document_id_str)
-    except ValueError:
-        return jsonify({"statuscode": 400, "message": "Invalid 'document_id' format. Must be an integer."}), 400
 
     # 2. Fetch authenticated customer details for authorization
     try:
         customer_obj = Customer.query.filter_by(guid=current_customer_guid).first()
         if not customer_obj:
             return jsonify({"statuscode": 404, "message": "Authenticated customer not found."}), 404
-
-        customer_id_for_db = customer_obj.id
-        business_id_for_db = customer_obj.business_id
 
     except Exception as e:
         current_app.logger.error(f"Error fetching customer details for download: {e}")
@@ -208,9 +202,9 @@ def download_customer_document():
     # 3. Retrieve the document metadata from the database
     try:
         document = db.session.query(CustomerDocument).filter_by(
-            id=document_id,
-            customer_id=customer_id_for_db, # Ensure document belongs to the authenticated customer
-            business_id=business_id_for_db   # Ensure document belongs to the customer's business
+            guid=document_guid,
+            customer_id=customer_obj.id, # Ensure document belongs to the authenticated customer
+            business_id=customer_obj.business_id   # Ensure document belongs to the customer's business
         ).first()
 
         if not document:
@@ -237,23 +231,41 @@ def download_customer_document():
     try:
         # 'get_object' is the S3 action for downloading
         # ExpiresIn sets the validity duration of the URL in seconds (e.g., 300 = 5 minutes)
-        presigned_url = s3_client_instance.generate_presigned_url(
-            'get_object',
-            Params={
-                'Bucket': bucket_name,
-                'Key': s3_object_key,
-                'ResponseContentDisposition': f'attachment; filename="{document.document_name}"' # Suggests a filename for download
-            },
-            ExpiresIn=300 # URL valid for 5 minutes (adjust as needed)
+        # presigned_url = s3_client_instance.generate_presigned_url(
+        #     'get_object',
+        #     Params={
+        #         'Bucket': bucket_name,
+        #         'Key': s3_object_key,
+        #         'ResponseContentDisposition': f'attachment; filename="{document.document_name}"' # Suggests a filename for download
+        #     },
+        #     ExpiresIn=300 
+        # )
+        
+        
+        s3_response = s3_client_instance.get_object(Bucket=bucket_name, Key=s3_object_key)
+        file_data = s3_response['Body'].read()
+
+        # Save to a temp file
+        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+            tmp_file.write(file_data)
+            tmp_file_path = tmp_file.name
+
+        # Send file to frontend
+        return send_file(
+            tmp_file_path,
+            as_attachment=True,
+            download_name=document.document_name,
+            mimetype=f"application/{document.file_type or 'octet-stream'}"
         )
 
-        return jsonify({
-            "statuscode": 200,
-            "message": "Pre-signed URL generated successfully.",
-            "download_url": presigned_url,
-            "document_name": document.document_name,
-            "file_type": document.file_type
-        }), 200
+
+        # return jsonify({
+        #     "statuscode": 200,
+        #     "message": "Pre-signed URL generated successfully.",
+        #     "download_url": presigned_url,
+        #     "document_name": document.document_name,
+        #     "file_type": document.file_type
+        # }), 200
 
     except ClientError as e:
         error_code = e.response['Error']['Code']
@@ -272,23 +284,13 @@ def download_customer_document():
 @customer_document_bp.route('/document-list', methods=['GET'])
 @jwt_required()
 def document_list():
-    """
-    Retrieves a paginated list of documents for the authenticated customer.
-
-    Query Parameters:
-    - page (int, optional): The page number to retrieve. Defaults to 1.
-    - per_page (int, optional): The number of items per page. Defaults to 10.
-    """
+   
     current_customer_guid = get_jwt_identity()
 
-    # 1. Fetch authenticated customer details for authorization
     try:
-        customer_obj = Customer.query.filter_by(guid=current_customer_guid).first()
-        if not customer_obj:
+        customer = Customer.query.filter_by(guid=current_customer_guid).first()
+        if not customer:
             return jsonify({"statuscode": 404, "message": "Authenticated customer not found."}), 404
-
-        customer_id_for_db = customer_obj.id
-        business_id_for_db = customer_obj.business_id
 
     except Exception as e:
         current_app.logger.error(f"Error fetching customer details for document list: {e}")
@@ -297,7 +299,7 @@ def document_list():
     # 2. Get pagination parameters from query string
     try:
         page = int(request.args.get('page', 1))  # Default to page 1
-        per_page = int(request.args.get('per_page', 10)) # Default to 10 items per page
+        per_page = int(request.args.get('perPage', 10)) # Default to 10 items per page
 
         # Validate parameters to ensure they are positive
         if page < 1 or per_page < 1:
@@ -310,42 +312,40 @@ def document_list():
     except ValueError:
         return jsonify({"statuscode": 400, "message": "Invalid 'page' or 'per_page' format. Must be integers."}), 400
 
-    # 3. Query documents with pagination
     try:
-        # Base query to filter documents by the authenticated customer and business
-        # Order by created_at to ensure consistent pagination results (e.g., newest first)
-        base_query = db.session.query(CustomerDocument).filter_by(
-            customer_id=customer_id_for_db,
-            business_id=business_id_for_db
-        ).order_by(CustomerDocument.created_at.desc())
-
+        
+        documentLists = CustomerDocument.query.filter_by(
+                        customer_id=customer.id,
+                        business_id=customer.business_id,
+                        deleted=0
+                    ).paginate(page=page, per_page=per_page, error_out=False)
+   
+   
+        # Prepare customer data for JSON serialization
+        # You'll need to define a way to serialize your Customer model instances.
+        # A common approach is to add a .to_dict() method to your model.
+        documents_data = [doc.to_dict() for doc in documentLists.items]
+      
         # Use Flask-SQLAlchemy's .paginate() method
         # error_out=False prevents raising a 404 error if the page number is out of range,
         # instead it returns an empty items list and appropriate metadata.
-        paginated_documents = base_query.paginate(page=page, per_page=per_page, error_out=False)
 
-        # 4. Prepare the list of documents for the JSON response
-        documents_data = []
-        for doc in paginated_documents.items:          
-            documents_data.append(doc.to_dict())
-
-        # 5. Return the paginated response with metadata
-        return jsonify({
-            "statuscode": 200,
-            "message": "Documents retrieved successfully.",
-            "data": documents_data,
-            "pagination": {
-                "total_items": paginated_documents.total,        # Total number of items across all pages
-                "total_pages": paginated_documents.pages,        # Total number of pages
-                "current_page": paginated_documents.page,      # Current page number
-                "items_on_page": len(paginated_documents.items), # Number of items returned on the current page
-                "items_per_page": paginated_documents.per_page,  # Configured items per page
-                "has_next": paginated_documents.has_next,        # True if there's a next page
-                "has_prev": paginated_documents.has_prev,        # True if there's a previous page
-                "next_page": paginated_documents.next_num,       # Next page number (or None)
-                "prev_page": paginated_documents.prev_num        # Previous page number (or None)
-            }
-        }), 200
+        response_data = {
+            'documents': documents_data,
+            'pagination': {
+                'total_items': documentLists.total,
+                'total_pages': documentLists.pages,
+                'current_page': documentLists.page,
+                'per_page': documentLists.per_page,
+                'has_next': documentLists.has_next,
+                'has_prev': documentLists.has_prev,
+                'next_page_num': documentLists.next_num,
+                'prev_page_num': documentLists.prev_num,
+            },
+            'message': 'Customers fetched successfully',
+            'status': 200
+        }
+        return jsonify(response_data), 200
 
     except SQLAlchemyError as e:
         current_app.logger.error(f"Database error retrieving document list: {e}")

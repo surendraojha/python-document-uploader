@@ -16,6 +16,7 @@ class CustomerDocument(db.Model):
     document_path = db.Column(db.String(250),nullable=False)
     file_type = db.Column(db.String(25),nullable=False)
     file_size = db.Column(db.String(25),nullable=False)
+    verified_status = db.Column(db.Boolean,nullable=False,default=False)
     deleted = db.Column(db.Boolean,nullable=False,default=False)
     created_at = db.Column(DATETIME, nullable=False, default=datetime.utcnow)
     updated_at = db.Column(DATETIME, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
